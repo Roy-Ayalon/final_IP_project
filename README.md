@@ -5,7 +5,7 @@
 ```bash
 # 1. Clone the repository and move into it
 git clone https://github.com/Roy-Ayalon/final_IP_project.git
-cd <your-project>
+cd final_IP_project
 
 # 2. Create a virtual environment
 python -m venv wheat_venv
