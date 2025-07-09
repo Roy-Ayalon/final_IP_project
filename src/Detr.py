@@ -1,7 +1,15 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import torchmetrics
+from torchvision.utils import draw_bounding_boxes, make_grid
+from torchmetrics.detection.mean_ap import MeanAveragePrecision
 import math
+from loss import HungarianSetCriterion1C
+from torchvision.ops import box_convert
+import torchvision
+from torchvision.utils import draw_bounding_boxes, make_grid
+import pytorch_lightning as pl
 
 
 class MLP(nn.Module):
@@ -56,7 +64,7 @@ class PositionEmbeddingSine(nn.Module):
         return pos
 
 
-class DETR(nn.Module):
+class DETR(pl.LightningModule):
     """
     DETR model: backbone + transformer + prediction heads.
     Outputs raw logits and normalized bounding boxes.
@@ -69,9 +77,12 @@ class DETR(nn.Module):
         nheads=8,
         num_encoder_layers=6,
         num_decoder_layers=6,
-        backbone=None
+        backbone=None,
+        lr: float = 1e-4,
+        weight_decay: float = 1e-4,
     ):
         super().__init__()
+        self.save_hyperparameters(ignore=["backbone"])
         # Backbone
         if backbone is None:
             resnet = torch.hub.load(
@@ -105,6 +116,17 @@ class DETR(nn.Module):
         # Prediction heads
         self.class_embed = nn.Linear(hidden_dim, num_classes + 1)
         self.bbox_embed = MLP(hidden_dim, hidden_dim, 4, 3)
+        
+        self.map_metric = MeanAveragePrecision(
+            box_format="cxcywh",   # our boxes are in (cx,cy,w,h) normalised
+            iou_type="bbox",
+        )
+        
+        self.criterion = HungarianSetCriterion1C(eos_coef=0.1)
+
+        # Lightning‑specific hyper‑parameters
+        self.lr = lr
+        self.weight_decay = weight_decay
 
     def forward(self, x):
         # x: [B, 3, H, W]
@@ -125,11 +147,129 @@ class DETR(nn.Module):
         tgt = torch.zeros_like(query_embed)
 
         # Transformer forward
-        hs = self.transformer(src + pos, tgt + query_embed)  # [num_decoder_layers, num_queries, B, hidden_dim]
-        hs = hs[-1].permute(1, 0, 2)  # [B, num_queries, hidden_dim]
+        hs = self.transformer(src + pos, tgt + query_embed)
+        hs = hs.permute(1, 0, 2)  # [B, num_queries, hidden_dim]
+        
 
         # Predict classes and boxes
         logits = self.class_embed(hs)                      # [B, num_queries, num_classes+1]
         boxes = self.bbox_embed(hs).sigmoid()              # [B, num_queries, 4]
 
         return {'pred_logits': logits, 'pred_boxes': boxes}
+
+    # ---------------------------------------------------------------------
+    # Lightning helpers
+    # ---------------------------------------------------------------------
+    def compute_loss(self, outputs, targets):
+        return self.criterion(outputs, targets)
+
+    def training_step(self, batch, batch_idx):
+        images, targets = batch
+        outputs = self(images)
+        loss = self.compute_loss(outputs, targets)
+        self.log("train_loss", loss, prog_bar=True, on_step=True, on_epoch=True)
+        return loss
+
+    def validation_step(self, batch, batch_idx):
+        images, targets = batch
+        outputs = self(images)
+        loss = self.compute_loss(outputs, targets)
+        self.log("val_loss", loss, prog_bar=True, on_step=False, on_epoch=True)
+        preds, gts = [], []
+        Nq = outputs["pred_logits"].shape[1]
+
+        for i in range(images.size(0)):
+            # ­­­ Predictions
+            logits = outputs["pred_logits"][i]           # [Nq, 1+ε]
+            probs  = logits.softmax(-1)                  # to probabilities
+            scores, labels = probs[:, :-1].max(-1)       # skip ε column
+            boxes   = outputs["pred_boxes"][i]           # [Nq,4]
+
+            keep = scores > 0.05                         # low thresh to speed up metric
+            preds.append({
+                "boxes":  boxes[keep],
+                "scores": scores[keep],
+                "labels": labels[keep],                  # single fg class → all zeros
+            })
+
+            # ­­­ Ground-truth
+            gts.append({
+                "boxes":  targets[i]["boxes"],
+                "labels": targets[i].get(
+                    "labels",
+                    torch.zeros(len(targets[i]["boxes"]),
+                                dtype=torch.long,
+                                device=boxes.device)
+                ),
+            })
+
+        self.map_metric.update(preds, gts)
+        # cache the FIRST image of the FIRST batch once per epoch for media logging
+        if batch_idx == 0:
+            self._val_vis_image = images[0].detach().cpu()
+            self._val_vis_pred_logits = outputs["pred_logits"][0].detach().cpu()
+            self._val_vis_pred_boxes  = outputs["pred_boxes"][0].detach().cpu()
+            self._val_vis_target_boxes = targets[0]["boxes"].detach().cpu()
+        return loss
+
+    # -----------------------------------------------------------------
+    # Media logging
+    # -----------------------------------------------------------------
+    @staticmethod
+    def _xywh_to_xyxy_norm(boxes):
+        """
+        Convert normalised (cx, cy, w, h) in [0,1] to (x1,y1,x2,y2) also in [0,1].
+        """
+        cx, cy, w, h = boxes.unbind(-1)
+        x1 = cx - 0.5 * w
+        y1 = cy - 0.5 * h
+        x2 = cx + 0.5 * w
+        y2 = cy + 0.5 * h
+        return torch.stack((x1, y1, x2, y2), dim=-1)
+
+    def on_validation_epoch_end(self):
+        """
+        Log one composite image (original + predictions) once per epoch.
+        Works automatically with TensorBoardLogger.
+        """
+        map_res = self.map_metric.compute()     # dict with 'map', 'map_50', …
+        self.log("val_map", map_res["map"], prog_bar=True, on_epoch=True)
+        self.map_metric.reset()
+        
+        if not hasattr(self, "_val_vis_image"):
+            return  # nothing cached (e.g. in distributed eval)
+        img  = (self._val_vis_image.clone() * 255).byte()      # [3,H,W] uint8
+
+        H, W = img.shape[1:]
+
+        # ------------------------------------------------------------------
+        # Convert cached cxcywh ∈ [0,1] → xyxy pixels for both GT & preds
+        # ------------------------------------------------------------------
+        # ground‑truth
+        gt_boxes_xyxy = self._xywh_to_xyxy_norm(
+            self._val_vis_target_boxes.clone()
+        ) * torch.tensor([W, H, W, H])
+        gt_boxes_px = gt_boxes_xyxy.int()
+
+        # predicted boxes: filter by class != 'no‑object' & confidence
+        pred_logits = self._val_vis_pred_logits      # [Nq,C+1]
+        scores, labels = pred_logits.softmax(-1).max(-1)
+        keep = (labels != pred_logits.shape[-1] - 1) & (scores > 0.5)
+        pred_boxes = self._val_vis_pred_boxes[keep]
+        pred_boxes_xyxy = self._xywh_to_xyxy_norm(pred_boxes) * torch.tensor([W, H, W, H])
+        pred_boxes_px = pred_boxes_xyxy.int()
+
+        # draw
+        vis_pred = draw_bounding_boxes(img, pred_boxes_px, colors="red", width=2)
+        vis_gt   = draw_bounding_boxes(img, gt_boxes_px,   colors="green", width=2)
+
+        grid = make_grid([vis_gt, vis_pred], nrow=2)
+
+        if hasattr(self.logger, "experiment") and callable(getattr(self.logger.experiment, "add_image", None)):
+            self.logger.experiment.add_image("val/gt_vs_pred", grid, global_step=self.current_epoch)
+
+    def configure_optimizers(self):
+        optimizer = torch.optim.AdamW(
+            self.parameters(), lr=self.lr, weight_decay=self.weight_decay
+        )
+        return optimizer

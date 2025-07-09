@@ -1,11 +1,16 @@
-import os, glob
-from torch.utils.data import Dataset, DataLoader
+import os
+from pathlib import Path
+import ast
+import pandas as pd
+from PIL import Image
+from torch.utils.data import Dataset
+from torchvision import transforms as T
 import cv2
 from definitions import *
 import torch
 import numpy as np
 
-class WheatSegDataset(Dataset):
+class WheatSegDatasetUnet(Dataset):
     def __init__(self, images_dir, masks_dir, transform=None):
         self.images_dir = images_dir
         self.masks_dir = masks_dir
@@ -46,7 +51,9 @@ class WheatSegDataset(Dataset):
         image = cv2.imread(img_path)
         image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
         mask = cv2.imread(mask_path, cv2.IMREAD_GRAYSCALE)
-
+        # Resize to 256x256
+        image = cv2.resize(image, (256, 256), interpolation=cv2.INTER_LINEAR)
+        mask = cv2.resize(mask, (256, 256), interpolation=cv2.INTER_NEAREST)
         if self.transform:
             augmented = self.transform(image=image, mask=mask)
             image = augmented['image']
@@ -65,10 +72,85 @@ class WheatSegDataset(Dataset):
 
         return image, mask
 
-def get_dataloaders(batch_size=BATCH_SIZE, num_workers=NUM_WORKERS):
-    train_ds = WheatSegDataset("/Users/royayalon/Documents/Academy/final_IP_project/data/train", "/Users/royayalon/Documents/Academy/final_IP_project/data/train_masks")
-    val_ds   = WheatSegDataset("/Users/royayalon/Documents/Academy/final_IP_project/data/val",   "/Users/royayalon/Documents/Academy/final_IP_project/data/val_masks")
-    return (
-      DataLoader(train_ds, batch_size=batch_size, shuffle=True,  num_workers=num_workers),
-      DataLoader(val_ds,   batch_size=batch_size, shuffle=False, num_workers=num_workers)
-    )
+class WheatSegDatasetDETR(Dataset):
+    """
+    Global Wheat Detection dataset (Kaggle) adapted for DETR.
+
+    Parameters
+    ----------
+    csv_path : str | Path
+        Path to `train.csv` (or any CSV with the five columns:
+        `image_id,width,height,bbox,source`).
+    images_dir : str | Path
+        Directory that contains the images as `<image_id>.jpg`.
+    transforms : callable, optional
+        A torchvision-style transform applied to the *image* **only**.
+        Box coordinates are always kept in absolute pixels and
+        converted to normalised cx-cy-w-h *after* transforms.
+        If you need box-aware transforms (flip, scale, …) use Albumentations
+        or Kornia and wrap the dataset accordingly.
+    """
+
+    def __init__(self, csv_path, images_dir, transforms=None):
+        self.images_dir = Path(images_dir)
+        self.transforms = transforms or T.Compose(
+            [T.ToTensor()]  # gives [0,1] float32
+        )
+
+        # ── Build a lookup: image_id → list[xywh] in pixels ───────────────
+        df = pd.read_csv(csv_path)
+        df["bbox"] = df["bbox"].apply(ast.literal_eval)
+
+        # groupby is ~5× faster than dict(list(zip(...)))
+        self.boxes_per_img = (
+            df.groupby("image_id")["bbox"]
+            .apply(list)
+            .to_dict()
+        )
+
+        # include images that have *no* boxes
+        self.image_ids = sorted([p.stem for p in self.images_dir.glob("*.jpg")])
+
+    # ------------------------------------------------------------
+    # PyTorch Dataset API
+    # ------------------------------------------------------------
+    def __len__(self):
+        return len(self.image_ids)
+
+    def __getitem__(self, idx):
+        image_id = self.image_ids[idx]
+        img_path = self.images_dir / f"{image_id}.jpg"
+
+        # PIL -> Tensor in [0,1]
+        image = self.transforms(Image.open(img_path).convert("RGB"))
+        _, H, W = image.shape
+
+        # list of [xmin, ymin, w, h] in *pixels*
+        xywh_boxes = self.boxes_per_img.get(image_id, [])
+
+        if len(xywh_boxes):
+            boxes = torch.as_tensor(xywh_boxes, dtype=torch.float32)
+            # convert to cx,cy,w,h and normalise to [0,1]
+            boxes[:, 0] += boxes[:, 2] / 2        # x-min + w/2  →  cx
+            boxes[:, 1] += boxes[:, 3] / 2        # y-min + h/2  →  cy
+            boxes[:, [0, 2]] /= W
+            boxes[:, [1, 3]] /= H
+        else:
+            boxes = torch.zeros((0, 4), dtype=torch.float32)
+
+        target = {
+            "boxes":  boxes,                           # [N,4] cxcywh in [0,1]
+            "labels": torch.zeros(len(boxes), dtype=torch.long),  # single class → 0
+            "image_id": image_id,
+            "orig_size": torch.tensor([H, W])
+        }
+
+        return image, target
+
+    # ------------------------------------------------------------
+    # Convenience: batch images, keep targets as list[dict]
+    # ------------------------------------------------------------
+    @staticmethod
+    def collate_fn(batch):
+        imgs, targets = tuple(zip(*batch))
+        return torch.stack(imgs), list(targets)
