@@ -1,5 +1,6 @@
 albumentations==2.0.8
 ipykernel==6.29.5
+kaggle>=1.5.0
 matplotlib==3.10.3
 moviepy==2.2.1
 opencv-python==4.11.0.86

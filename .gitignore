@@ -14,3 +14,4 @@
 /src/__pycache__/*
 /src/checkpoints
 /data
+/train
