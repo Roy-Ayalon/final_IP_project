@@ -36,7 +36,7 @@ def parse_args():
                         help="Number of data loading workers")
     parser.add_argument("--val_ratio", type=float, default=0.1,
                         help="Validation split ratio")
-    
+     
     # Model arguments
     parser.add_argument("--num_queries", type=int, default=100,
                         help="Number of object queries for DETR")

@@ -227,7 +227,7 @@ def setup_unet_data(csv_path, images_dir, val_ratio=0.2, seed=42):
     print(f"🚀 To train U-Net, run:")
     print(f"   python src/train_unet.py --images_dir {train_images_dir} --masks_dir {train_masks_dir} --val_images_dir {val_images_dir} --val_masks_dir {val_masks_dir}")
 
-
+ 
 def setup_detr_data(csv_path, images_dir, val_ratio=0.2, seed=42):
     """
     Setup data structure for DETR training:

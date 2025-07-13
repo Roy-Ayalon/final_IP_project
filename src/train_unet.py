@@ -9,7 +9,7 @@ import wandb
 
 from unet import UNet
 from dataset import WheatSegDatasetUnet
-
+ 
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Train U-Net model for wheat head segmentation")

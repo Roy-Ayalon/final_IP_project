@@ -8,7 +8,7 @@ from loss import HungarianSetCriterion1C
 from torchvision.ops import box_convert
 import pytorch_lightning as pl
 from pytorch_lightning.loggers import WandbLogger
-
+ 
 
 CONFIDENCE_THRESHOLD_DEFAULT = 0.3
 COCO_PRETRAINED_URL = "https://dl.fbaipublicfiles.com/detr/detr-r50-e632da11.pth"

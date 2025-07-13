@@ -5,7 +5,7 @@ import pytorch_lightning as pl
 from pytorch_lightning.loggers import WandbLogger
 from torchvision.utils import make_grid
 import torchmetrics
-
+ 
 class DoubleConv(nn.Module):
     def __init__(self, in_c, out_c):
         super().__init__()

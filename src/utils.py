@@ -40,7 +40,7 @@ def mask_to_boxes(mask_bin, min_size=10):
             continue
         boxes.append([x, y, x + w, y + h])
     return boxes
-
+ 
 def iou(box1, box2):
     """IoU of 2 boxes [x1,y1,x2,y2]"""
     xA, yA = max(box1[0], box2[0]), max(box1[1], box2[1])

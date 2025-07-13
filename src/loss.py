@@ -4,7 +4,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-
+ 
 class HungarianSetCriterion1C(nn.Module):
     """
     Hungarian matching + set loss for single-class detection.
