@@ -1,5 +1,8 @@
 # 🌾 Wheat Head Detection - Final IP Project
 
+Guy Perets 209207117
+Roy Ayalon 211326533
+
 ## � Project Overview
 
 This project implements **wheat head detection** using computer vision and deep learning techniques. The goal is to detect and localize individual wheat heads in field images, which is crucial for agricultural analysis, yield estimation, and crop monitoring.
