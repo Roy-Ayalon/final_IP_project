@@ -13,3 +13,4 @@
 /src/test_side_by_side
 /src/__pycache__/*
 /src/checkpoints
+/data
