@@ -53,15 +53,15 @@ def parse_args():
     
     return parser.parse_args()
 
-# Select device
-device = torch.device("mps") if torch.backends.mps.is_available() else \
-         torch.device("cuda") if torch.cuda.is_available() else \
-         torch.device("cpu")
-
-print(f"Using device: {device}")
 
 
 def main():
+    # Select device
+    device = torch.device("mps") if torch.backends.mps.is_available() else \
+            torch.device("cuda") if torch.cuda.is_available() else \
+            torch.device("cpu")
+
+    print(f"Using device: {device}")
     args = parse_args()
     
     print(f"=== Training Configuration ===")

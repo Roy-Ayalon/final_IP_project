@@ -72,7 +72,8 @@ def split_dataset(
             annotated.append(img_path)
         else:
             print(f"Image {img_path} has no mask, moving to unannotated directory.")
-            shutil.move(img_path, os.path.join(unannotated_dir, os.path.basename(img_path)))
+            shutil.copy(img_path, os.path.join(unannotated_dir, os.path.basename(img_path)))
+            
 
     random.seed(seed)
     random.shuffle(annotated)
@@ -84,19 +85,20 @@ def split_dataset(
     for i, img_path in enumerate(train_set, start=1):
         base_name = f"{prefix}_{i:04d}"
         dst_img = os.path.join(train_images_dir, base_name + os.path.splitext(img_path)[1])
-        shutil.move(img_path, dst_img)
+        shutil.copy(img_path, dst_img)
         src_mask = os.path.join(masks_dir, os.path.splitext(os.path.basename(img_path))[0] + ".png")
         dst_mask = os.path.join(train_masks_dir, base_name + ".png")
-        shutil.move(src_mask, dst_mask)
+        shutil.copy(src_mask, dst_mask)
 
     # Move and rename val images/masks
     for i, img_path in enumerate(val_set, start=1):
         base_name = f"{prefix}_{i:04d}"
         dst_img = os.path.join(val_images_dir, base_name + os.path.splitext(img_path)[1])
-        shutil.move(img_path, dst_img)
+        shutil.copy(img_path, dst_img)
         src_mask = os.path.join(masks_dir, os.path.splitext(os.path.basename(img_path))[0] + ".png")
         dst_mask = os.path.join(val_masks_dir, base_name + ".png")
-        shutil.move(src_mask, dst_mask)
+        shutil.copy(src_mask, dst_mask)
+        
 
 def download_kaggle_dataset(username=None, key=None):
     """
@@ -234,9 +236,16 @@ def setup_detr_data(csv_path, images_dir, val_ratio=0.2, seed=42):
     - Ready for DETR training
     """
     print("🏗️ Setting up data for DETR training...")
-    
-    # Create folder structure
     base_dir = "data_detr"
+    
+    if os.path.exists("wheat_data"):
+        print("Using existing wheat_data directory.")
+        os.rename("wheat_data", base_dir)
+        print(f"✅ DETR data prepared in '{base_dir}' folder")
+        print(f"🚀 To train DETR, run:")
+        print(f"   python src/train_detr.py --csv_path {detr_csv_path} --images_dir {detr_images_dir}")
+        return
+    # Create folder structure
     os.makedirs(base_dir, exist_ok=True)
     
     detr_images_dir = os.path.join(base_dir, "train")

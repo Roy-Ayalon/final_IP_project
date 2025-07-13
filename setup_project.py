@@ -104,14 +104,21 @@ def main():
     print()
     
     # Setup data for each model
-    for model in models:
+    for i, model in enumerate(models):
         print(f"\n📦 Setting up data for {model.upper()}...")
-        
-        cmd = [
-            sys.executable, "src/generate_data.py",
-            "--model", model,
-            "--val_ratio", val_ratio
-        ]
+        if os.path.exists("wheat_data"):
+            cmd = [
+                "python3", "src/generate_data.py",
+                "--model", model,
+                "--val_ratio", val_ratio,
+                "--skip_download"
+            ]
+        else:
+            cmd = [
+                "python3", "src/generate_data.py",
+                "--model", model,
+                "--val_ratio", val_ratio
+            ]
         
         # Add Kaggle credentials if provided
         if kaggle_username and kaggle_key:
@@ -125,6 +132,7 @@ def main():
         except KeyboardInterrupt:
             print("\n⚠️ Setup interrupted by user")
             sys.exit(1)
+                                        
     
     print("\n" + "="*50)
     print("✅ Setup complete! Your data is ready for training.")

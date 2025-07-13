@@ -39,9 +39,12 @@ git clone https://github.com/Roy-Ayalon/final_IP_project.git
 cd final_IP_project
 ```
 
-### Step 2: Activate Virtual Environment
+### Step 2: Create & Activate Virtual Environment
 
 ```bash
+# Create a wheat-env virtual enviroment
+python -m venv wheat-env
+
 # Activate the existing wheat-env virtual environment
 source wheat-env/bin/activate
 
@@ -56,10 +59,6 @@ which python
 python -m pip install --upgrade pip
 pip install -r requirements.txt
 
-# Install additional dependencies for training
-pip install pytorch-lightning wandb torchmetrics
-pip install segmentation-models-pytorch
-
 # Verify installation
 pip list | grep torch
 ```
@@ -68,11 +67,40 @@ pip list | grep torch
 
 ## 📊 Data Preparation
 
+### Option 1: Interactive Setup (Recommended)
+
+Simply run the interactive setup script:
+
+```bash
+python setup_project.py
+```
+
+This will:
+- Guide you through choosing U-Net or DETR (or both)
+- Automatically download the Global Wheat Detection dataset from Kaggle
+- Set up all necessary folders and files
+- Give you the exact commands to start training
+
+### Option 2: Direct Command Line
+
+For more control, use the generate_data.py script directly:
+
+```bash
+# Setup for U-Net training with API credentials
+python src/generate_data.py --model unet --kaggle_username YOUR_USERNAME --kaggle_key YOUR_API_KEY
+
+# Setup for DETR training with existing kaggle.json
+python src/generate_data.py --model detr
+
+# Custom validation split (e.g., 15% validation)
+python src/generate_data.py --model unet --val_ratio 0.15 --kaggle_username YOUR_USERNAME --kaggle_key YOUR_API_KEY
+```
+
 ### Understanding Your Data Structure
 
 Your data should be organized as follows:
 ```
-data/
+data_detr/
 ├── train.csv              # Annotations with bounding boxes
 ├── train/                 # Training images
 │   ├── b6ab77fd7.jpg     # Individual image files
@@ -81,33 +109,33 @@ data/
 └── test/                  # Test images (for inference)
     ├── 2fd875eaa.jpg
     └── ...
+
+data_unet/
+├── masks/                 
+├── train/                 # Training data split
+│   ├── images/           # Training images
+│   │   ├── img_0001.jpg
+│   │   ├── img_0002.jpg
+│   │   └── ...
+│   └── masks/            # Training masks
+│       ├── img_0001.jpg
+│       ├── img_0002.jpg
+│       └── ...
+├── val/                   # Validation data split
+│   ├── images/           # Validation images
+│   │   ├── img_0003.jpg
+│   │   ├── img_0004.jpg
+│   │   └── ...
+│   └── masks/            # Validation masks
+│       ├── img_0003.jpg
+│       ├── img_0004.jpg
+│       └── ...
+└── unannotated/           # Images without 
+    ├── img_no_wheat_001.jpg
+    ├── img_no_wheat_002.jpg
+    └── ...
+
 ```
-
-### Generate Preprocessed Dataset
-
-Use the data generation script to create masks and split your dataset:
-
-```bash
-# Generate masks from bounding boxes and split into train/val
-python src/generate_data.py \
-  --csv data/train.csv \
-  --images_dir data/train \
-  --output_masks_dir data/train_masks \
-  --train_images_dir data/processed/train \
-  --train_masks_dir data/processed/train_masks \
-  --val_images_dir data/processed/val \
-  --val_masks_dir data/processed/val_masks \
-  --unannotated_dir data/unannotated \
-  --val_ratio 0.2 \
-  --seed 42 \
-  --prefix img
-```
-
-This will:
-- ✅ Generate binary masks from bounding box annotations
-- ✅ Split dataset into training (80%) and validation (20%) sets
-- ✅ Move images without annotations to `unannotated/` folder
-- ✅ Rename files with consistent naming (`img_0001.jpg`, etc.)
 
 ---
 
@@ -120,8 +148,8 @@ Train the DETR model with command line arguments:
 ```bash
 # Basic training with default parameters
 python src/train_detr.py \
-  --csv_path data/train.csv \
-  --images_dir data/train \
+  --csv_path data_detr/train.csv \
+  --images_dir data_detr/train \
   --epochs 50 \
   --batch_size 16 \
   --learning_rate 1e-4 \
@@ -129,8 +157,8 @@ python src/train_detr.py \
 
 # Advanced training with custom parameters
 python src/train_detr.py \
-  --csv_path data/train.csv \
-  --images_dir data/train \
+  --csv_path data_detr/train.csv \
+  --images_dir data_detr/train \
   --epochs 100 \
   --batch_size 32 \
   --learning_rate 1e-4 \
@@ -147,10 +175,10 @@ python src/train_detr.py \
 ```bash
 # Train U-Net for segmentation-based detection
 python src/train_unet.py \
-  --images_dir data/processed/train \
-  --masks_dir data/processed/train_masks \
-  --val_images_dir data/processed/val \
-  --val_masks_dir data/processed/val_masks \
+  --images_dir data_unet/train/images \
+  --masks_dir data_unet/train/masks \
+  --val_images_dir data_unet/val/images \
+  --val_masks_dir data_unet/val/masks \
   --epochs 50 \
   --batch_size 8 \
   --learning_rate 1e-4
@@ -213,7 +241,8 @@ final_IP_project/
 │   ├── loss.py              # Loss functions (Hungarian matching)
 │   ├── generate_data.py     # Data preprocessing utilities
 │   └── definitions.py       # Configuration constants
-├── data/                    # Your wheat detection dataset
+├── data_unet/                    # Your wheat detection dataset
+├── data_detr/
 ├── wheat-env/              # Python virtual environment
 ├── requirements.txt        # Project dependencies
 └── README.md              # This file
