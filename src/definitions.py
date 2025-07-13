@@ -1,8 +1,8 @@
-NUM_EPOCHS = 20
-BATCH_SIZE = 64  # Reduced to 4 for memory constraints
+NUM_EPOCHS = 500
+BATCH_SIZE = 32
 LEARNING_RATE = 1e-4
 NUM_WORKERS = 8
-VAL_RATIO = 0.2
+VAL_RATIO = 0.1
 
 TVERSKY_ALPHA = 0.5 # For FP
 TVERSKY_BETA = 0.5 # For FN

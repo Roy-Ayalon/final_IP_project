@@ -1,15 +1,17 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import torchmetrics
 from torchvision.utils import draw_bounding_boxes, make_grid
 from torchmetrics.detection.mean_ap import MeanAveragePrecision
 import math
 from loss import HungarianSetCriterion1C
 from torchvision.ops import box_convert
-import torchvision
-from torchvision.utils import draw_bounding_boxes, make_grid
 import pytorch_lightning as pl
+from pytorch_lightning.loggers import WandbLogger
+
+
+CONFIDENCE_THRESHOLD_DEFAULT = 0.3
+COCO_PRETRAINED_URL = "https://dl.fbaipublicfiles.com/detr/detr-r50-e632da11.pth"
 
 
 class MLP(nn.Module):
@@ -80,6 +82,10 @@ class DETR(pl.LightningModule):
         backbone=None,
         lr: float = 1e-4,
         weight_decay: float = 1e-4,
+        confidence_threshold: float = CONFIDENCE_THRESHOLD_DEFAULT,
+        pretrained: bool = False,
+        pretrained_url: str = COCO_PRETRAINED_URL,
+        warmup_epochs: int = 5,
     ):
         super().__init__()
         self.save_hyperparameters(ignore=["backbone"])
@@ -117,8 +123,12 @@ class DETR(pl.LightningModule):
         self.class_embed = nn.Linear(hidden_dim, num_classes + 1)
         self.bbox_embed = MLP(hidden_dim, hidden_dim, 4, 3)
         
-        self.map_metric = MeanAveragePrecision(
+        self.val_map_metric = MeanAveragePrecision(
             box_format="cxcywh",   # our boxes are in (cx,cy,w,h) normalised
+            iou_type="bbox",
+        )
+        self.train_map_metric = MeanAveragePrecision(
+            box_format="cxcywh",
             iou_type="bbox",
         )
         
@@ -127,6 +137,11 @@ class DETR(pl.LightningModule):
         # Lightning‑specific hyper‑parameters
         self.lr = lr
         self.weight_decay = weight_decay
+        self.confidence_threshold = confidence_threshold
+        self.warmup_epochs = warmup_epochs
+        if pretrained:
+            state_dict = torch.hub.load_state_dict_from_url(pretrained_url, map_location="cpu")
+            self.load_state_dict(state_dict, strict=False)
 
     def forward(self, x):
         # x: [B, 3, H, W]
@@ -168,6 +183,37 @@ class DETR(pl.LightningModule):
         outputs = self(images)
         loss = self.compute_loss(outputs, targets)
         self.log("train_loss", loss, prog_bar=True, on_step=True, on_epoch=True)
+        # ────────────────────────────────────────────────
+        # mAP (train) update
+        # ────────────────────────────────────────────────
+        preds, gts = [], []
+        Nq = outputs["pred_logits"].shape[1]
+
+        for i in range(images.size(0)):
+            logits = outputs["pred_logits"][i]
+            probs  = logits.softmax(-1)
+            scores, labels = probs[:, :-1].max(-1)
+            boxes = outputs["pred_boxes"][i]
+
+            keep = torch.arange(Nq, device=boxes.device)  # keep all queries
+
+            preds.append({
+                "boxes":  boxes[keep],
+                "scores": scores[keep],
+                "labels": labels[keep],
+            })
+
+            gts.append({
+                "boxes":  targets[i]["boxes"],
+                "labels": targets[i].get(
+                    "labels",
+                    torch.zeros(len(targets[i]["boxes"]),
+                                dtype=torch.long,
+                                device=boxes.device)
+                ),
+            })
+
+        self.train_map_metric.update(preds, gts)
         return loss
 
     def validation_step(self, batch, batch_idx):
@@ -179,13 +225,15 @@ class DETR(pl.LightningModule):
         Nq = outputs["pred_logits"].shape[1]
 
         for i in range(images.size(0)):
-            # ­­­ Predictions
             logits = outputs["pred_logits"][i]           # [Nq, 1+ε]
-            probs  = logits.softmax(-1)                  # to probabilities
-            scores, labels = probs[:, :-1].max(-1)       # skip ε column
+            probs  = logits.softmax(-1)                  # convert to probabilities
+
+            # Foreground (non‑background) confidence & label
+            scores, labels = probs[:, :-1].max(-1)       # skip ε / background column
             boxes   = outputs["pred_boxes"][i]           # [Nq,4]
 
-            keep = scores > 0.05                         # low thresh to speed up metric
+            keep = torch.arange(Nq) # Keep all queries
+
             preds.append({
                 "boxes":  boxes[keep],
                 "scores": scores[keep],
@@ -203,13 +251,14 @@ class DETR(pl.LightningModule):
                 ),
             })
 
-        self.map_metric.update(preds, gts)
+        self.val_map_metric.update(preds, gts)
         # cache the FIRST image of the FIRST batch once per epoch for media logging
         if batch_idx == 0:
-            self._val_vis_image = images[0].detach().cpu()
-            self._val_vis_pred_logits = outputs["pred_logits"][0].detach().cpu()
-            self._val_vis_pred_boxes  = outputs["pred_boxes"][0].detach().cpu()
-            self._val_vis_target_boxes = targets[0]["boxes"].detach().cpu()
+            random_idx = torch.randint(0, images.size(0), (1,)).item()
+            self._val_vis_image = images[random_idx].detach().cpu()
+            self._val_vis_pred_logits = outputs["pred_logits"][random_idx].detach().cpu()
+            self._val_vis_pred_boxes  = outputs["pred_boxes"][random_idx].detach().cpu()
+            self._val_vis_target_boxes = targets[random_idx]["boxes"].detach().cpu()
         return loss
 
     # -----------------------------------------------------------------
@@ -232,9 +281,9 @@ class DETR(pl.LightningModule):
         Log one composite image (original + predictions) once per epoch.
         Works automatically with TensorBoardLogger.
         """
-        map_res = self.map_metric.compute()     # dict with 'map', 'map_50', …
+        map_res = self.val_map_metric.compute()     # dict with 'map', 'map_50', …
         self.log("val_map", map_res["map"], prog_bar=True, on_epoch=True)
-        self.map_metric.reset()
+        self.val_map_metric.reset()
         
         if not hasattr(self, "_val_vis_image"):
             return  # nothing cached (e.g. in distributed eval)
@@ -253,23 +302,50 @@ class DETR(pl.LightningModule):
 
         # predicted boxes: filter by class != 'no‑object' & confidence
         pred_logits = self._val_vis_pred_logits      # [Nq,C+1]
-        scores, labels = pred_logits.softmax(-1).max(-1)
-        keep = (labels != pred_logits.shape[-1] - 1) & (scores > 0.5)
+        probs = pred_logits.softmax(-1)
+        scores, labels = probs[:, :-1].max(-1)       # foreground class confidence
+        keep = scores > self.confidence_threshold    # filter by confidence
         pred_boxes = self._val_vis_pred_boxes[keep]
         pred_boxes_xyxy = self._xywh_to_xyxy_norm(pred_boxes) * torch.tensor([W, H, W, H])
         pred_boxes_px = pred_boxes_xyxy.int()
 
         # draw
-        vis_pred = draw_bounding_boxes(img, pred_boxes_px, colors="red", width=2)
-        vis_gt   = draw_bounding_boxes(img, gt_boxes_px,   colors="green", width=2)
+        vis_pred = draw_bounding_boxes(img, pred_boxes_px, colors="red", width=3)
+        vis_gt   = draw_bounding_boxes(img, gt_boxes_px,   colors="blue", width=3)
 
         grid = make_grid([vis_gt, vis_pred], nrow=2)
 
-        if hasattr(self.logger, "experiment") and callable(getattr(self.logger.experiment, "add_image", None)):
+        # Log image with WandbLogger if available, otherwise fallback to TensorBoard
+        if isinstance(self.logger, WandbLogger):
+            # Lightning helper logs to W&B media panel
+            self.logger.log_image(
+                key="val/gt_vs_pred",
+                images=[grid],
+                step=self.current_epoch,
+            )
+        elif hasattr(self.logger, "experiment") and callable(getattr(self.logger.experiment, "add_image", None)):
+            # TensorBoard fallback
             self.logger.experiment.add_image("val/gt_vs_pred", grid, global_step=self.current_epoch)
+
+    def on_train_epoch_end(self):
+        """
+        Compute & log mAP over the entire training epoch, then reset.
+        """
+        map_res = self.train_map_metric.compute()
+        self.log("train_map", map_res["map"], prog_bar=True, on_epoch=True)
+        self.train_map_metric.reset()
 
     def configure_optimizers(self):
         optimizer = torch.optim.AdamW(
             self.parameters(), lr=self.lr, weight_decay=self.weight_decay
         )
+
+        # Optional linear warm‑up over the first `warmup_epochs` epochs.
+        if self.warmup_epochs > 0:
+            scheduler = torch.optim.lr_scheduler.LambdaLR(
+                optimizer,
+                lr_lambda=lambda epoch: min((epoch + 1) / float(self.warmup_epochs), 1.0),
+            )
+            return [optimizer], [{"scheduler": scheduler, "interval": "epoch"}]
+
         return optimizer

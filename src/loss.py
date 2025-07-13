@@ -19,7 +19,7 @@ class HungarianSetCriterion1C(nn.Module):
     # -------- Hungarian match (identical to multi-class except for cost_class) ---
     @torch.no_grad()
     def _match(self, p_logits, p_boxes, tgt_boxes):
-        # p_logits : [Nq, 1]
+        # p_logits : [Nq, 2]  (foreground, ε)
         # Convert to probability and build the cost
         prob_fg   = p_logits.softmax(-1)[:,0]
         
@@ -41,19 +41,30 @@ class HungarianSetCriterion1C(nn.Module):
         loss_cls = loss_l1 = loss_giou = 0.0
 
         for b in range(bs):
-            idx_q, idx_t = self._match(p_logits[b], p_boxes[b], targets[b]["boxes"])
+            tgt_boxes = targets[b]["boxes"]
+            # ---- short‑circuit if image has no ground‑truth wheat heads ----
+            if tgt_boxes.numel() == 0:
+                tgt_full = p_logits.new_full((Nq,), 1, dtype=torch.long)  # all ε
+                loss_cls += F.cross_entropy(
+                    p_logits[b],
+                    tgt_full,
+                    weight=self.ce_weight,
+                )
+                continue
+            idx_q, idx_t = self._match(p_logits[b], p_boxes[b], tgt_boxes)
+            num_match = len(idx_q)
             # build the *wheat/ε* label vector
             tgt_full = p_logits.new_full((Nq,), 1, dtype=torch.long)  # ε
             tgt_full[idx_q] = 0                                       # wheat
 
             loss_cls += F.cross_entropy(p_logits[b], tgt_full, weight=self.ce_weight)
             matched_p = p_boxes[b, idx_q]
-            matched_t = targets[b]["boxes"][idx_t]
-
-            loss_l1   += F.l1_loss(matched_p, matched_t, reduction="sum") / Nq
+            matched_t = tgt_boxes[idx_t]
+            loss_l1   += F.l1_loss(matched_p, matched_t, reduction="sum") / max(num_match, 1)
             loss_giou += (1 - generalized_box_iou(
                               box_convert(matched_p, 'cxcywh', 'xyxy'),
                               box_convert(matched_t, 'cxcywh', 'xyxy')
-                           ).diag()).sum() / Nq
+                           ).diag()).sum() / max(num_match, 1)
+            
 
         return loss_cls + self.l1_w * loss_l1 + self.giou_w * loss_giou

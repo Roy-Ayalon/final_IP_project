@@ -9,6 +9,161 @@ import cv2
 from definitions import *
 import torch
 import numpy as np
+import albumentations as A
+from albumentations.pytorch import ToTensorV2
+
+
+# ────────────────────── helpers ──────────────────────
+def coco_to_cxcywh_norm(boxes, w, h):
+    """
+    COCO [xmin, ymin, bw, bh] → normalised [cx, cy, bw, bh].
+    """
+    if boxes.numel() == 0:
+        return boxes.reshape(0, 4)
+    boxes = boxes.clone()
+    boxes[:, 0] += boxes[:, 2] / 2.0
+    boxes[:, 1] += boxes[:, 3] / 2.0
+    boxes[:, [0, 2]] /= w
+    boxes[:, [1, 3]] /= h
+    return boxes
+
+
+def _bbox_params():
+    return A.BboxParams(format="coco",
+                        min_visibility=0.3,
+                        label_fields=["labels"])
+
+
+def _post():
+    """Resize + tensor conversion *shared* by every pipeline."""
+    return [
+        A.Resize(256, 256),
+        A.ToFloat(max_value=255.0),
+        ToTensorV2(),
+    ]
+
+
+# ────────────────────── single-step augs ──────────────────────
+def aug_identity():
+    return A.Compose(_post(), bbox_params=_bbox_params())
+
+
+def aug_hflip():
+    return A.Compose([A.HorizontalFlip(p=1.0), *_post()],
+                     bbox_params=_bbox_params())
+
+
+def aug_vflip():
+    return A.Compose([A.VerticalFlip(p=1.0), *_post()],
+                     bbox_params=_bbox_params())
+
+
+def aug_crop():
+    return A.Compose([
+        A.CenterCrop(768, 768, p=1.0),
+        *_post()
+    ], bbox_params=_bbox_params())
+
+
+def aug_noise():
+    return A.Compose([A.GaussNoise(var_limit=(10, 50), p=1.0), *_post()],
+                     bbox_params=_bbox_params())
+
+
+def aug_blur():
+    return A.Compose([A.GaussianBlur(blur_limit=(3, 7), p=1.0), *_post()],
+                     bbox_params=_bbox_params())
+
+# ────────────────────── combos (same tweak) ──────────────────────
+def build_transforms():
+    single = {
+        "orig":  aug_identity(),
+        "hflip": aug_hflip(),
+        "vflip": aug_vflip(),
+        "crop":  aug_crop(),
+        "noise": aug_noise(),
+        "blur":  aug_blur(),
+    }
+
+    combos = {
+        "hflip+noise": A.Compose([
+            A.HorizontalFlip(p=1.0),
+            A.GaussNoise(var_limit=(10, 50), p=1.0),
+            *_post()
+        ], bbox_params=_bbox_params()),
+
+        "crop+blur": A.Compose([
+            A.CenterCrop(768, 768, p=1.0),
+            A.GaussianBlur(blur_limit=(3, 7), p=1.0),
+            *_post()
+        ], bbox_params=_bbox_params()),
+        "hflip+vflip": A.Compose([
+            A.HorizontalFlip(p=1.0),
+            A.VerticalFlip(p=1.0),
+            *_post()
+        ], bbox_params=_bbox_params()),
+        "vflip+crop+noise": A.Compose([
+            A.VerticalFlip(p=1.0),
+            A.CenterCrop(768, 768, p=1.0),
+            A.GaussNoise(var_limit=(10, 50), p=1.0),
+            *_post()
+        ], bbox_params=_bbox_params())
+    }
+
+    return {**single, **combos}
+
+
+# ────────────────────── dataset ──────────────────────
+class WheatSegDatasetDETRMultiAug(Dataset):
+    """
+    Each (image × augmentation) pair → one sample, images returned at 256×256.
+    """
+    def __init__(self, csv_path, images_dir, transforms_dict=None):
+        self.images_dir = Path(images_dir)
+        self.tfms = transforms_dict or build_transforms()
+
+        df = pd.read_csv(csv_path)
+        df["bbox"] = df["bbox"].apply(ast.literal_eval)
+        self.boxes = df.groupby("image_id")["bbox"].apply(list).to_dict()
+        self.image_ids = sorted([p.stem for p in self.images_dir.glob("*.jpg")])
+
+        self._index = [(i, t) for i in range(len(self.image_ids))
+                             for t in self.tfms.keys()]
+
+    def __len__(self):
+        return len(self._index)
+
+    def __getitem__(self, idx):
+        img_idx, tname = self._index[idx]
+        image_id = self.image_ids[img_idx]
+        img_path = self.images_dir / f"{image_id}.jpg"
+
+        image = Image.open(img_path).convert("RGB")
+        bboxes = self.boxes.get(image_id, [])
+        labels = [0] * len(bboxes)
+
+        t = self.tfms[tname](image=np.array(image),
+                             bboxes=bboxes,
+                             labels=labels)
+
+        img_t = t["image"]                                   # [C,256,256]
+        boxes_t = torch.as_tensor(t["bboxes"], dtype=torch.float32)
+
+        boxes_t = coco_to_cxcywh_norm(boxes_t, 256, 256)
+
+        target = {
+            "boxes": boxes_t,
+            "labels": torch.zeros(len(boxes_t), dtype=torch.long),
+            "image_id": f"{image_id}|{tname}",
+            "orig_size": torch.tensor([256, 256]),
+        }
+        return img_t, target
+
+    @staticmethod
+    def collate_fn(batch):
+        imgs, targets = zip(*batch)
+        return torch.stack(imgs), list(targets)
+    
 
 class WheatSegDatasetUnet(Dataset):
     def __init__(self, images_dir, masks_dir, transform=None):
@@ -93,9 +248,22 @@ class WheatSegDatasetDETR(Dataset):
 
     def __init__(self, csv_path, images_dir, transforms=None):
         self.images_dir = Path(images_dir)
-        self.transforms = transforms or T.Compose(
-            [T.ToTensor()]  # gives [0,1] float32
-        )
+        # Always resize each image to 256 × 256 before any other processing
+        if transforms is None:
+            self.transforms = T.Compose([
+                T.Resize((256, 256)),
+                T.ToTensor(),          # converts to float32 in [0, 1]
+            ])
+        else:
+            # Ensure the resize happens first, then run the user‑provided transforms
+            if isinstance(transforms, T.Compose):
+                self.transforms = T.Compose(
+                    [T.Resize((256, 256)), *transforms.transforms]
+                )
+            else:
+                self.transforms = T.Compose(
+                    [T.Resize((256, 256)), transforms]
+                )
 
         # ── Build a lookup: image_id → list[xywh] in pixels ───────────────
         df = pd.read_csv(csv_path)
@@ -121,9 +289,9 @@ class WheatSegDatasetDETR(Dataset):
         image_id = self.image_ids[idx]
         img_path = self.images_dir / f"{image_id}.jpg"
 
-        # PIL -> Tensor in [0,1]
-        image = self.transforms(Image.open(img_path).convert("RGB"))
-        _, H, W = image.shape
+        pil_img = Image.open(img_path).convert("RGB")
+        orig_W, orig_H = pil_img.size           # record original dimensions
+        image = self.transforms(pil_img)        # → tensor in [0, 1], 3 × 256 × 256
 
         # list of [xmin, ymin, w, h] in *pixels*
         xywh_boxes = self.boxes_per_img.get(image_id, [])
@@ -133,8 +301,8 @@ class WheatSegDatasetDETR(Dataset):
             # convert to cx,cy,w,h and normalise to [0,1]
             boxes[:, 0] += boxes[:, 2] / 2        # x-min + w/2  →  cx
             boxes[:, 1] += boxes[:, 3] / 2        # y-min + h/2  →  cy
-            boxes[:, [0, 2]] /= W
-            boxes[:, [1, 3]] /= H
+            boxes[:, [0, 2]] /= orig_W
+            boxes[:, [1, 3]] /= orig_H
         else:
             boxes = torch.zeros((0, 4), dtype=torch.float32)
 
@@ -142,7 +310,7 @@ class WheatSegDatasetDETR(Dataset):
             "boxes":  boxes,                           # [N,4] cxcywh in [0,1]
             "labels": torch.zeros(len(boxes), dtype=torch.long),  # single class → 0
             "image_id": image_id,
-            "orig_size": torch.tensor([H, W])
+            "orig_size": torch.tensor([orig_H, orig_W])
         }
 
         return image, target
