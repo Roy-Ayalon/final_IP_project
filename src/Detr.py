@@ -35,7 +35,7 @@ class MLP(nn.Module):
 
 class PositionEmbeddingSine(nn.Module):
     """
-    Sine-cosine positional encoding as in the DETR paper.
+    Sine positional encoding as in the DETR paper.
     """
     def __init__(self, num_pos_feats=128, temperature=10000, normalize=False, scale=None):
         super().__init__()
@@ -139,6 +139,7 @@ class DETR(pl.LightningModule):
         self.weight_decay = weight_decay
         self.confidence_threshold = confidence_threshold
         self.warmup_epochs = warmup_epochs
+        # Load pretrained weights if specified
         if pretrained:
             state_dict = torch.hub.load_state_dict_from_url(pretrained_url, map_location="cpu")
             self.load_state_dict(state_dict, strict=False)
@@ -172,9 +173,6 @@ class DETR(pl.LightningModule):
 
         return {'pred_logits': logits, 'pred_boxes': boxes}
 
-    # ---------------------------------------------------------------------
-    # Lightning helpers
-    # ---------------------------------------------------------------------
     def compute_loss(self, outputs, targets):
         return self.criterion(outputs, targets)
 
@@ -183,9 +181,6 @@ class DETR(pl.LightningModule):
         outputs = self(images)
         loss = self.compute_loss(outputs, targets)
         self.log("train_loss", loss, prog_bar=True, on_step=True, on_epoch=True)
-        # ────────────────────────────────────────────────
-        # mAP (train) update
-        # ────────────────────────────────────────────────
         preds, gts = [], []
         Nq = outputs["pred_logits"].shape[1]
 
@@ -197,21 +192,9 @@ class DETR(pl.LightningModule):
 
             keep = torch.arange(Nq, device=boxes.device)  # keep all queries
 
-            preds.append({
-                "boxes":  boxes[keep],
-                "scores": scores[keep],
-                "labels": labels[keep],
-            })
+            preds.append({"boxes":  boxes[keep], "scores": scores[keep], "labels": labels[keep]})
 
-            gts.append({
-                "boxes":  targets[i]["boxes"],
-                "labels": targets[i].get(
-                    "labels",
-                    torch.zeros(len(targets[i]["boxes"]),
-                                dtype=torch.long,
-                                device=boxes.device)
-                ),
-            })
+            gts.append({"boxes":  targets[i]["boxes"], "labels": targets[i].get("labels", torch.zeros(len(targets[i]["boxes"]), dtype=torch.long, device=boxes.device))})
 
         self.train_map_metric.update(preds, gts)
         return loss
@@ -225,31 +208,19 @@ class DETR(pl.LightningModule):
         Nq = outputs["pred_logits"].shape[1]
 
         for i in range(images.size(0)):
-            logits = outputs["pred_logits"][i]           # [Nq, 1+ε]
-            probs  = logits.softmax(-1)                  # convert to probabilities
+            logits = outputs["pred_logits"][i]          
+            probs  = logits.softmax(-1)                 
 
-            # Foreground (non‑background) confidence & label
-            scores, labels = probs[:, :-1].max(-1)       # skip ε / background column
-            boxes   = outputs["pred_boxes"][i]           # [Nq,4]
+            # ­­­ Predictions
+            scores, labels = probs[:, :-1].max(-1)       
+            boxes   = outputs["pred_boxes"][i]           
 
-            keep = torch.arange(Nq) # Keep all queries
+            keep = torch.arange(Nq) 
 
-            preds.append({
-                "boxes":  boxes[keep],
-                "scores": scores[keep],
-                "labels": labels[keep],                  # single fg class → all zeros
-            })
+            preds.append({"boxes":  boxes[keep], "scores": scores[keep], "labels": labels[keep],})
 
             # ­­­ Ground-truth
-            gts.append({
-                "boxes":  targets[i]["boxes"],
-                "labels": targets[i].get(
-                    "labels",
-                    torch.zeros(len(targets[i]["boxes"]),
-                                dtype=torch.long,
-                                device=boxes.device)
-                ),
-            })
+            gts.append({"boxes":  targets[i]["boxes"], "labels": targets[i].get("labels", torch.zeros(len(targets[i]["boxes"]), dtype=torch.long, device=boxes.device)),})
 
         self.val_map_metric.update(preds, gts)
         # cache the FIRST image of the FIRST batch once per epoch for media logging
@@ -261,9 +232,6 @@ class DETR(pl.LightningModule):
             self._val_vis_target_boxes = targets[random_idx]["boxes"].detach().cpu()
         return loss
 
-    # -----------------------------------------------------------------
-    # Media logging
-    # -----------------------------------------------------------------
     @staticmethod
     def _xywh_to_xyxy_norm(boxes):
         """
@@ -281,30 +249,25 @@ class DETR(pl.LightningModule):
         Log one composite image (original + predictions) once per epoch.
         Works automatically with TensorBoardLogger.
         """
-        map_res = self.val_map_metric.compute()     # dict with 'map', 'map_50', …
+        map_res = self.val_map_metric.compute()     
         self.log("val_map", map_res["map"], prog_bar=True, on_epoch=True)
         self.val_map_metric.reset()
         
         if not hasattr(self, "_val_vis_image"):
-            return  # nothing cached (e.g. in distributed eval)
+            return  
         img  = (self._val_vis_image.clone() * 255).byte()      # [3,H,W] uint8
 
         H, W = img.shape[1:]
 
-        # ------------------------------------------------------------------
-        # Convert cached cxcywh ∈ [0,1] → xyxy pixels for both GT & preds
-        # ------------------------------------------------------------------
         # ground‑truth
-        gt_boxes_xyxy = self._xywh_to_xyxy_norm(
-            self._val_vis_target_boxes.clone()
-        ) * torch.tensor([W, H, W, H])
+        gt_boxes_xyxy = self._xywh_to_xyxy_norm(self._val_vis_target_boxes.clone()) * torch.tensor([W, H, W, H])
         gt_boxes_px = gt_boxes_xyxy.int()
 
-        # predicted boxes: filter by class != 'no‑object' & confidence
-        pred_logits = self._val_vis_pred_logits      # [Nq,C+1]
+        # predicted boxes
+        pred_logits = self._val_vis_pred_logits     
         probs = pred_logits.softmax(-1)
-        scores, labels = probs[:, :-1].max(-1)       # foreground class confidence
-        keep = scores > self.confidence_threshold    # filter by confidence
+        scores, labels = probs[:, :-1].max(-1)      
+        keep = scores > self.confidence_threshold   
         pred_boxes = self._val_vis_pred_boxes[keep]
         pred_boxes_xyxy = self._xywh_to_xyxy_norm(pred_boxes) * torch.tensor([W, H, W, H])
         pred_boxes_px = pred_boxes_xyxy.int()
@@ -336,11 +299,9 @@ class DETR(pl.LightningModule):
         self.train_map_metric.reset()
 
     def configure_optimizers(self):
-        optimizer = torch.optim.AdamW(
-            self.parameters(), lr=self.lr, weight_decay=self.weight_decay
-        )
+        optimizer = torch.optim.AdamW(self.parameters(), lr=self.lr, weight_decay=self.weight_decay)
 
-        # Optional linear warm‑up over the first `warmup_epochs` epochs.
+        # Learning rate scheduler with warmup
         if self.warmup_epochs > 0:
             scheduler = torch.optim.lr_scheduler.LambdaLR(
                 optimizer,

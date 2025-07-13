@@ -18,11 +18,9 @@ class DoubleConv(nn.Module):
 class UNet(pl.LightningModule):
     def __init__(self, in_channels=3, features=[64,128,256,512], lr: float = 1e-3):
         super().__init__()
-        # Lightning: save hyperparameters
         self.save_hyperparameters()
         self.lr = lr
         # Average Precision metric for segmentation masks
-        # uses per-pixel binary average precision
         self.val_ap = torchmetrics.AveragePrecision(task='binary').to("cpu")
         print(f"Using device {self.val_ap.device} for AveragePrecision metric")
         # encoder

@@ -11,7 +11,6 @@ from torch.utils.data import DataLoader
 from torchmetrics.segmentation import DiceScore
 from unet import UNet
 
-# ─── Competition metric helpers ────────────────────────────────────────────
 IOU_THRESHOLDS = np.arange(0.50, 0.76, 0.05)
 
 def to_uint8(mask, thr=0.5):
@@ -23,7 +22,7 @@ def to_uint8(mask, thr=0.5):
         mask = mask[0]
 
     if mask.dtype == np.uint8:
-        return (mask > 0).astype(np.uint8)   # tolerate 0/255 masks
+        return (mask > 0).astype(np.uint8)  
     if np.issubdtype(mask.dtype, np.floating):
         return (mask >= thr).astype(np.uint8)
     if mask.dtype == np.bool_:
@@ -86,44 +85,16 @@ def image_precision(gt_mask, pred_mask, show=False):
         image_precisions.append(tp / (tp + fp + fn + 1e-6))
     return np.mean(image_precisions)
 
-import cv2
-import numpy as np
-
-def mask_to_centroid_boxes(mask_bin: np.ndarray,
-                           min_size: int = 10,
-                           pad: int | float = 0,
-                           clip: bool = True) -> list[list[int]]:
+def mask_to_centroid_boxes(mask_bin: np.ndarray, min_size: int = 10, pad: int | float = 0, clip: bool = True) -> list[list[int]]:
     """
     Convert a binary (uint8/0-1) mask to bounding boxes whose edges are
     2 × the maximum centroid-to-contour distance along x and y.
-
-    Parameters
-    ----------
-    mask_bin : ndarray  (H, W)
-        Binary mask – *values must be 0/1 or 0/255*.  A batch dimension
-        should be squeezed beforehand.
-    min_size : int, default 10
-        Ignore blobs whose *max(width, height)* is smaller than this.
-    pad : int | float, default 0
-        Extra pixels (int) **or** relative padding (float < 1) added
-        symmetrically on all sides.  `pad=0.1` enlarges the box by 10 %.
-    clip : bool, default True
-        Clamp coordinates to stay inside the image.
-
-    Returns
-    -------
-    boxes : list[[x1, y1, x2, y2]]
-        One entry per retained blob, integer pixel coords inclusive
-        (same convention as Kaggle's GWHD metric).
     """
     assert mask_bin.ndim == 2, "mask must be H×W, squeeze batch first"
     H, W = mask_bin.shape[:2]
     mask_bin = (mask_bin > 0).astype(np.uint8)
 
-    # ── find external contours ───────────────────────────────────────────────
-    contours, _ = cv2.findContours(mask_bin,
-                                   cv2.RETR_EXTERNAL,
-                                   cv2.CHAIN_APPROX_NONE)
+    contours, _ = cv2.findContours(mask_bin, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
 
     boxes = []
     for cnt in contours:
@@ -144,7 +115,6 @@ def mask_to_centroid_boxes(mask_bin: np.ndarray,
         if max(dx, dy) < min_size / 2:
             continue
 
-        # optional symmetric padding
         if isinstance(pad, int):
             dx += pad
             dy += pad
@@ -169,7 +139,6 @@ def mask_to_centroid_boxes(mask_bin: np.ndarray,
 
     return boxes
 
-# ─── Loss: BCE + Dice ──────────────────────────────────────────────────────
 class BCEDiceLoss(nn.Module):
     def __init__(self):
         super().__init__()

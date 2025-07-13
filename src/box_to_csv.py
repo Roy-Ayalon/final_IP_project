@@ -1,14 +1,3 @@
-"""
-make_submission.py  –  From U-Net masks → Global Wheat Detection CSV
---------------------------------------------------------------------
-Assumes:
-• Trained U-Net weights at  'unet_baseline_mps.pth'
-• Test images in           'data/test/'
-Produces:
-• CSV 'sub_unet.csv'  formatted as:
-      image_id,PredictionString
-"""
-
 import os, glob, csv, math
 import numpy as np
 import pandas as pd
@@ -19,12 +8,10 @@ from unet import UNet                # your model
 from dataset import WheatSegDataset  # reuse transforms
 from torch.utils.data import DataLoader
 
-# -------------------------------------------------------
-# 1. Load model
-# -------------------------------------------------------
+# hyperparameters
 DEVICE  = torch.device("mps") if torch.backends.mps.is_available() else "cpu"
-THRESH  = 0.35           # mask → binary threshold
-MIN_BOX = 10             # px; filter tiny FP boxes
+THRESH  = 0.35          
+MIN_BOX = 10             
 MODEL_W = "unet_baseline_mps.pth"
 
 model = UNet().to(DEVICE)
