@@ -1,17 +1,90 @@
-/data_unet
-/data_detr
-/wheat-env
-.DS_Store
-*.pyc
+# Data directories
+/data_unet/
+/data_detr/
+/data/
+/train/
+/wheat_data/
+
+# Virtual environment
+/wheat-env/
+venv/
+env/
+.venv/
+
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# Model checkpoints and weights
 *.pth
-*.png
-*.log
 *.ckpt
-*.txt
-/src/*.npy
-/src/wandb
-/src/test_side_by_side
-/src/__pycache__/*
-/src/checkpoints
-/data
-/train
+/checkpoints/
+/checkpoints_unet/
+/src/checkpoints/
+
+# Logs and monitoring
+*.log
+/wandb/
+/src/wandb/
+logs/
+.neptune/
+
+# Jupyter Notebook checkpoints
+.ipynb_checkpoints
+
+# macOS
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# IDE
+.vscode/settings.json
+.idea/
+*.swp
+*.swo
+*~
+
+# Temporary files
+*.tmp
+*.temp
+.cache/
+
+# Don't ignore important files
+!requirements.txt
+!train.csv
+!QUICKSTART.md
+!README.md
+!setup_project.py
+
+# Don't ignore assets and documentation images
+!assets_for_ip/
+!assets_for_ip/*.png
+!assets_for_ip/*.jpg
+!assets_for_ip/*.gif
+
+# Test outputs
+/src/test_side_by_side/
+*.npy
